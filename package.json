@@ -1,14 +1,14 @@
 {
-  "name": "@agegr/pi-web",
+  "name": "@w-finger/pi-web",
   "version": "0.8.1",
   "description": "Web UI for the pi coding agent",
-  "homepage": "https://github.com/agegr/pi-web#readme",
+  "homepage": "https://github.com/w-finger/pi-web#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agegr/pi-web.git"
+    "url": "git+https://github.com/w-finger/pi-web.git"
   },
   "bugs": {
-    "url": "https://github.com/agegr/pi-web/issues"
+    "url": "https://github.com/w-finger/pi-web/issues"
   },
   "license": "MIT",
   "engines": {
