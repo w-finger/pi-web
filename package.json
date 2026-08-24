@@ -11,6 +11,9 @@
     "url": "https://github.com/w-finger/pi-web/issues"
   },
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
