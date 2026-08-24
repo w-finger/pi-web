@@ -13,7 +13,6 @@ import { PluginsConfig } from "./PluginsConfig";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
@@ -21,7 +20,6 @@ import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 
-type SessionCopyField = "file" | "id";
 type AutoNameStatus =
   | { kind: "idle" }
   | { kind: "naming" }
@@ -92,19 +90,9 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
-  const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
-  const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
-    void copyText(value).then(() => {
-      if (sessionCopyTimerRef.current) clearTimeout(sessionCopyTimerRef.current);
-      setCopiedSessionField(field);
-      sessionCopyTimerRef.current = setTimeout(() => setCopiedSessionField(null), 1400);
-    });
-  }, []);
 
   useEffect(() => {
     return () => {
-      if (sessionCopyTimerRef.current) clearTimeout(sessionCopyTimerRef.current);
       if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
     };
   }, []);
@@ -998,18 +986,6 @@ export function AppShell() {
                   padding: "12px 16px",
                 }}>
                   {sessionStats ? (() => {
-                    const sessionRows = [
-                      ...(sessionStats.sessionName ? [{ label: "Name", value: sessionStats.sessionName, copyField: null }] : []),
-                      { label: "File", value: sessionStats.sessionFile ?? "In-memory", copyField: "file" as const },
-                      { label: "ID", value: sessionStats.sessionId, copyField: "id" as const },
-                    ];
-                    const messageRows = [
-                      ["User", sessionStats.userMessages.toLocaleString()],
-                      ["Assistant", sessionStats.assistantMessages.toLocaleString()],
-                      ["Tool Calls", sessionStats.toolCalls.toLocaleString()],
-                      ["Tool Results", sessionStats.toolResults.toLocaleString()],
-                      ["Total", sessionStats.totalMessages.toLocaleString()],
-                    ];
                     const tokenRows = [
                       ["Input", sessionStats.tokens.input.toLocaleString()],
                       ["Output", sessionStats.tokens.output.toLocaleString()],
@@ -1022,6 +998,17 @@ export function AppShell() {
                     const extraTokenRows = [
                       ...(sessionStats.cost > 0 ? [["Cost", `$${sessionStats.cost.toFixed(4)}`]] : []),
                       ...(ctx?.contextWindow ? [["Context", `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
+                    ];
+                    const mb = sessionStats.modelBreakdown;
+                    const modelRows = [
+                      ...(mb?.parents ?? []).map((p) => [
+                        `母 ${p.model}`,
+                        `${p.turns}t ↑${formatCompact(p.input)} ↓${formatCompact(p.output)}${p.cacheRead > 0 ? ` R${formatCompact(p.cacheRead)}` : ""} $${p.cost.toFixed(4)}`,
+                      ] as [string, string]),
+                      ...(mb?.children ?? []).map((c) => [
+                        `子 ${c.model.includes("/") ? c.model.slice(c.model.indexOf("/") + 1) : c.model}`,
+                        `×${c.calls} ${formatCompact(c.tokens)} tok $${c.cost.toFixed(4)}`,
+                      ] as [string, string]),
                     ];
                     const section = (
                       title: string,
@@ -1053,88 +1040,18 @@ export function AppShell() {
                           </div>
                         </div>
                       );
-                    const copyButton = (field: SessionCopyField, value: string) => {
-                      const copied = copiedSessionField === field;
-                      return (
-                        <button
-                          type="button"
-                          title={copied ? "Copied" : `Copy ${field === "file" ? "file path" : "session ID"}`}
-                          onClick={() => handleCopySessionField(field, value)}
-                          style={{
-                            alignSelf: "start",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            width: 22,
-                            height: 22,
-                            marginTop: -2,
-                            color: copied ? "var(--accent)" : "var(--text-dim)",
-                            background: "transparent",
-                            border: "1px solid var(--border)",
-                            borderRadius: 4,
-                            cursor: "pointer",
-                            flex: "0 0 auto",
-                            transition: "color 0.12s, border-color 0.12s, background 0.12s",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.color = "var(--accent)";
-                            e.currentTarget.style.borderColor = "var(--accent)";
-                            e.currentTarget.style.background = "var(--bg-hover)";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.color = copied ? "var(--accent)" : "var(--text-dim)";
-                            e.currentTarget.style.borderColor = "var(--border)";
-                            e.currentTarget.style.background = "transparent";
-                          }}
-                        >
-                          {copied ? (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                          ) : (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                          )}
-                        </button>
-                      );
-                    };
-                    const sessionInfoSection = (
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>Session Info</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
-                          {sessionRows.map((row) => (
-                            <div key={`session-info:${row.label}`} style={{ display: "contents" }}>
-                              <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.label}</div>
-                              <div style={{
-                                color: "var(--text-muted)",
-                                minWidth: 0,
-                                overflowWrap: "anywhere",
-                                wordBreak: "break-word",
-                                whiteSpace: "normal",
-                              }}>{row.value}</div>
-                              <div>{row.copyField ? copyButton(row.copyField, row.value) : null}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-
                     return (
                       <div style={{
-                        display: "grid",
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "minmax(360px, 1.7fr) minmax(140px, 0.55fr) minmax(190px, 0.75fr)",
-                        gap: isMobile ? 16 : 24,
+                        display: "flex",
+                        flexDirection: isMobile ? "column" : "row",
+                        flexWrap: "wrap",
+                        gap: isMobile ? 16 : 40,
                         fontSize: 12,
                         lineHeight: 1.5,
                         fontFamily: "var(--font-mono)",
                       }}>
-                        {sessionInfoSection}
-                        {section("Messages", messageRows)}
                         {section("Tokens", [...tokenRows, ...extraTokenRows], "right", true)}
+                        {modelRows.length > 0 ? section("Models", modelRows, "right", true) : null}
                       </div>
                     );
                   })() : (

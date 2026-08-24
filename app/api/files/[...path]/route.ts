@@ -18,6 +18,12 @@ import {
   getFileExt,
   getImageMime,
 } from "@/lib/file-types";
+
+function formatByteLimit(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)}MB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024}KB`;
+  return `${bytes}B`;
+}
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import {
@@ -461,7 +467,7 @@ export async function GET(
         return streamFile(filePath, stat, documentMime, request.headers.get("range"));
       }
       if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
-        return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
+        return NextResponse.json({ error: `File too large for preview (>${formatByteLimit(TEXT_PREVIEW_MAX_BYTES)})` }, { status: 413 });
       }
       const content = fs.readFileSync(filePath, "utf-8");
       const language = getLanguage(filePath);

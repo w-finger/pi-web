@@ -45,6 +45,12 @@ export interface SessionStatsInfo {
     total: number;
   };
   cost: number;
+  /** Per-model usage breakdown. parents = main-session models (from assistant
+   *  message usage); children = subagent models (from subagent tool-result details). */
+  modelBreakdown?: {
+    parents: Array<{ model: string; turns: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }>;
+    children: Array<{ model: string; calls: number; turns: number; tokens: number; cost: number }>;
+  };
   contextUsage?: ContextUsage;
 }
 

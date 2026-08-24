@@ -47,6 +47,13 @@ interface Props {
   compactResult?: CompactResultInfo | null;
   toolPreset?: "none" | "default" | "full";
   onToolPresetChange?: (preset: "none" | "default" | "full") => void;
+  subagentInstalled?: boolean;
+  subagentEnabled?: boolean;
+  onSubagentToggle?: (enabled: boolean) => void;
+  childModel?: { provider: string; modelId: string } | null;
+  onChildModelChange?: (sel: { provider: string; modelId: string }) => void;
+  judgeModel?: { provider: string; modelId: string } | null;
+  onJudgeModelChange?: (sel: { provider: string; modelId: string }) => void;
   thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   availableThinkingLevels?: string[] | null;
@@ -246,9 +253,130 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
   );
 }
 
+/** Compact model picker for subagent role groups (exec: scout/worker, judge: planner/reviewer). */
+function ChildModelDropdown({
+  groupLabel,
+  title,
+  value,
+  modelList,
+  onChange,
+  isMobile,
+  controlsMenuOpen,
+}: {
+  groupLabel: string;
+  title: string;
+  value: { provider: string; modelId: string } | null | undefined;
+  modelList?: { id: string; name: string; provider: string }[];
+  onChange: (sel: { provider: string; modelId: string }) => void;
+  isMobile: boolean;
+  controlsMenuOpen: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const displayLabel = (() => {
+    if (!value) return "未设置";
+    const hit = modelList?.find((m) => m.provider === value.provider && m.id === value.modelId);
+    return hit?.name || value.modelId;
+  })();
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title={`${title}: ${displayLabel}`}
+        aria-label={title}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+          padding: isMobile ? "0 6px" : "8px 12px",
+          width: isMobile ? "auto" : undefined,
+          height: 32,
+          background: open ? "var(--bg-hover)" : "none",
+          border: "none",
+          borderRadius: 9,
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 12,
+          transition: "background 0.12s, color 0.12s",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--bg-hover)";
+          e.currentTarget.style.color = "var(--text)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = open ? "var(--bg-hover)" : "none";
+          e.currentTarget.style.color = "var(--text-muted)";
+        }}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+          <rect x="10" y="10" width="4" height="4" />
+          <line x1="9" y1="2" x2="9" y2="6" />
+          <line x1="15" y1="2" x2="15" y2="6" />
+          <line x1="9" y1="18" x2="9" y2="22" />
+          <line x1="15" y1="18" x2="15" y2="22" />
+          <line x1="2" y1="9" x2="6" y2="9" />
+          <line x1="2" y1="15" x2="6" y2="15" />
+          <line x1="18" y1="9" x2="22" y2="9" />
+          <line x1="18" y1="15" x2="22" y2="15" />
+        </svg>
+        {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{groupLabel}·{displayLabel}</span>}
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", bottom: "calc(100% + 6px)", right: 0,
+          zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+          overflowY: "auto", minWidth: 220, maxHeight: 320,
+        }}>
+          {(modelList ?? []).length === 0 && (
+            <div style={{ padding: "7px 12px", fontSize: 12, color: "var(--text-dim)", whiteSpace: "nowrap" }}>无可用模型</div>
+          )}
+          {(modelList ?? []).map((m) => {
+            const isActive = value?.provider === m.provider && value?.modelId === m.id;
+            return (
+              <button
+                key={`${m.provider}/${m.id}`}
+                onClick={() => { setOpen(false); if (!isActive) onChange({ provider: m.provider, modelId: m.id }); }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  width: "100%", padding: "7px 12px",
+                  background: isActive ? "var(--bg-selected)" : "none",
+                  border: "none",
+                  color: isActive ? "var(--text)" : "var(--text-muted)",
+                  cursor: "pointer", fontSize: 12, textAlign: "left",
+                  fontWeight: isActive ? 600 : 400,
+                  whiteSpace: "nowrap",
+                }}
+                onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
+              >
+                {isActive
+                  ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                  : <span style={{ width: 10, flexShrink: 0 }} />}
+                <span style={{ flex: 1 }}>{m.name || m.id}</span>
+                <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{m.provider}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
+  subagentInstalled, subagentEnabled, onSubagentToggle, childModel, onChildModelChange, judgeModel, onJudgeModelChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -2033,6 +2161,71 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   </div>
                 )}
               </div>
+            )}
+
+            {!isStreaming && subagentInstalled && onSubagentToggle && (
+              <button
+                onClick={() => onSubagentToggle(!subagentEnabled)}
+                title={subagentEnabled ? "母子 agent 模式：已开启（主 agent 可委派任务给子 agent，点击关闭）" : "母子 agent 模式：已关闭（点击开启）"}
+                aria-label="Toggle parent-child subagent mode"
+                aria-pressed={subagentEnabled}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                  padding: isMobile ? "0 6px" : "8px 12px",
+                  width: isMobile ? "auto" : undefined,
+                  height: 32,
+                  background: subagentEnabled ? "var(--bg-selected)" : "none",
+                  border: "none",
+                  borderRadius: 9,
+                  color: subagentEnabled ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = subagentEnabled ? "var(--bg-selected)" : "none";
+                  e.currentTarget.style.color = subagentEnabled ? "var(--accent)" : "var(--text-muted)";
+                }}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="5.5" r="3" />
+                  <circle cx="5.5" cy="18" r="2.5" />
+                  <circle cx="18.5" cy="18" r="2.5" />
+                  <line x1="12" y1="8.5" x2="5.5" y2="15.5" />
+                  <line x1="12" y1="8.5" x2="18.5" y2="15.5" />
+                </svg>
+                {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>母子{subagentEnabled ? ":开" : ":关"}</span>}
+              </button>
+            )}
+            {!isStreaming && subagentInstalled && subagentEnabled && (onChildModelChange || onJudgeModelChange) && (
+              <>
+                {onJudgeModelChange && (
+                  <ChildModelDropdown
+                    groupLabel="判断"
+                    title="判断型子 agent 模型（planner / reviewer）"
+                    value={judgeModel}
+                    modelList={modelList}
+                    onChange={onJudgeModelChange}
+                    isMobile={isMobile}
+                    controlsMenuOpen={controlsMenuOpen}
+                  />
+                )}
+                {onChildModelChange && (
+                  <ChildModelDropdown
+                    groupLabel="执行"
+                    title="执行型子 agent 模型（scout / worker）"
+                    value={childModel}
+                    modelList={modelList}
+                    onChange={onChildModelChange}
+                    isMobile={isMobile}
+                    controlsMenuOpen={controlsMenuOpen}
+                  />
+                )}
+              </>
             )}
 
             {!isStreaming && onCompact && (

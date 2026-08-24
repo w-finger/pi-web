@@ -208,7 +208,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
+    handleToolPresetChange, handleThinkingLevelChange, handleSubagentToggle, handleChildModelChange, handleJudgeModelChange, loadSlashCommands,
+    subagentInstalled, subagentEnabled, childModel, judgeModel,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -349,6 +350,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       compactResult={compactResult}
       toolPreset={toolPreset}
       onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
+      subagentInstalled={subagentInstalled}
+      subagentEnabled={subagentEnabled}
+      onSubagentToggle={session || isNew ? handleSubagentToggle : undefined}
+      childModel={childModel}
+      onChildModelChange={session || isNew ? handleChildModelChange : undefined}
+      judgeModel={judgeModel}
+      onJudgeModelChange={session || isNew ? handleJudgeModelChange : undefined}
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}

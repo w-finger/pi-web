@@ -50,6 +50,28 @@ interface WorktreeState {
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 
+/** Sidebar session-list perspective: current project only vs. all workspaces */
+type SidebarViewMode = "project" | "all";
+const VIEW_MODE_STORAGE_KEY = "pi-web:sidebar-view-mode";
+
+function loadViewMode(): SidebarViewMode {
+  if (typeof window === "undefined") return "project";
+  try {
+    return window.localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "all" ? "all" : "project";
+  } catch {
+    return "project";
+  }
+}
+
+function saveViewMode(mode: SidebarViewMode): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+  } catch {
+    // ignore storage quota / privacy-mode errors
+  }
+}
+
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
@@ -136,6 +158,38 @@ function PathLabel({ text, style }: { text: string; style?: CSSProperties }) {
       <span style={{ unicodeBidi: "plaintext" }}>{text}</span>
     </span>
   );
+}
+
+/** Last path segment, used as the workspace display name */
+function workspaceName(root: string): string {
+  const parts = root.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? root;
+}
+
+interface WorkspaceGroup {
+  root: string;
+  tree: SessionTreeNode[];
+  /** Most recent session modified time inside this workspace */
+  latest: string;
+}
+
+/** Group sessions by workspace (projectRoot), newest activity first */
+function groupSessionsByWorkspace(sessions: SessionInfo[]): WorkspaceGroup[] {
+  const byRoot = new Map<string, SessionInfo[]>();
+  for (const s of sessions) {
+    const root = s.projectRoot ?? s.cwd;
+    if (!root) continue;
+    const list = byRoot.get(root);
+    if (list) list.push(s);
+    else byRoot.set(root, [s]);
+  }
+  return [...byRoot.entries()]
+    .map(([root, list]) => ({
+      root,
+      tree: buildSessionTree(list),
+      latest: list.reduce((max, s) => (s.modified > max ? s.modified : max), ""),
+    }))
+    .sort((a, b) => b.latest.localeCompare(a.latest));
 }
 
 const DROPDOWN_ANIMATION_MS = 140;
@@ -353,6 +407,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  const [viewMode, setViewMode] = useState<SidebarViewMode>(() => loadViewMode());
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Once the SSE stream has delivered a frame it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
@@ -405,6 +461,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
+
+  useEffect(() => {
+    saveViewMode(viewMode);
+  }, [viewMode]);
+
+  const toggleViewMode = useCallback(() => {
+    setViewMode((v) => (v === "project" ? "all" : "project"));
+  }, []);
+
+  const toggleWorkspaceCollapsed = useCallback((root: string) => {
+    setCollapsedWorkspaces((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     // Live running status via SSE — no polling. The server pushes the current
@@ -754,6 +827,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Build parent-child tree within the filtered set
   const sessionTree = buildSessionTree(filteredSessions);
+  // All-workspaces view: every project, grouped and ordered by recent activity
+  const workspaceGroups = viewMode === "all" ? groupSessionsByWorkspace(allSessions) : [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -784,16 +859,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               disabled={!selectedCwd}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                background: "var(--bg-hover)",
-                border: "1px solid var(--border)",
-                color: selectedCwd ? "var(--text-muted)" : "var(--text-dim)",
+                background: selectedCwd ? "color-mix(in srgb, var(--accent) 10%, transparent)" : "var(--bg-hover)",
+                border: selectedCwd ? "1px solid color-mix(in srgb, var(--accent) 28%, transparent)" : "1px solid var(--border)",
+                color: selectedCwd ? "var(--accent)" : "var(--text-dim)",
                 cursor: selectedCwd ? "pointer" : "not-allowed",
                 height: 32,
                 paddingLeft: 10,
                 paddingRight: 12,
-                borderRadius: 7,
+                borderRadius: 8,
                 fontSize: 12,
-                fontWeight: 500,
+                fontWeight: 600,
                 letterSpacing: "-0.01em",
                 flexShrink: 0,
                 transition: "background 0.12s, color 0.12s, border-color 0.12s",
@@ -801,14 +876,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               title={selectedCwd ? `New session in ${selectedCwd}` : "Select a project first"}
               onMouseEnter={(e) => {
                 if (!selectedCwd) return;
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+                e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 16%, transparent)";
+                e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 45%, transparent)";
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = selectedCwd ? "var(--text-muted)" : "var(--text-dim)";
-                e.currentTarget.style.borderColor = "var(--border)";
+                e.currentTarget.style.background = selectedCwd ? "color-mix(in srgb, var(--accent) 10%, transparent)" : "var(--bg-hover)";
+                e.currentTarget.style.color = selectedCwd ? "var(--accent)" : "var(--text-dim)";
+                e.currentTarget.style.borderColor = selectedCwd ? "color-mix(in srgb, var(--accent) 28%, transparent)" : "var(--border)";
               }}
             >
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -816,6 +890,50 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 <line x1="1" y1="6" x2="11" y2="6" />
               </svg>
               New
+            </button>
+            <button
+              onClick={toggleViewMode}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: viewMode === "all" ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg-hover)",
+                border: viewMode === "all" ? "1px solid color-mix(in srgb, var(--accent) 35%, transparent)" : "1px solid var(--border)",
+                color: viewMode === "all" ? "var(--accent)" : "var(--text-muted)",
+                cursor: "pointer",
+                width: 32, height: 32,
+                borderRadius: 8,
+                padding: 0,
+                flexShrink: 0,
+                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+              }}
+              onMouseEnter={(e) => {
+                if (viewMode === "all") return;
+                e.currentTarget.style.background = "var(--bg-selected)";
+                e.currentTarget.style.color = "var(--accent)";
+                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+              }}
+              onMouseLeave={(e) => {
+                if (viewMode === "all") return;
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text-muted)";
+                e.currentTarget.style.borderColor = "var(--border)";
+              }}
+              title={viewMode === "all" ? "All workspaces — click to show current workspace only" : "Current workspace — click to show all workspaces"}
+              aria-label={viewMode === "all" ? "Show current workspace only" : "Show all workspaces"}
+              aria-pressed={viewMode === "all"}
+            >
+              {viewMode === "all" ? (
+                /* stacked workspaces icon — currently showing all */
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2 2 7l10 5 10-5-10-5z" />
+                  <path d="M2 12l10 5 10-5" />
+                  <path d="M2 17l10 5 10-5" />
+                </svg>
+              ) : (
+                /* single folder icon — currently showing one workspace */
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+                </svg>
+              )}
             </button>
             <button
               onClick={() => loadSessions(false)}
@@ -1380,12 +1498,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && filteredSessions.length === 0 && (
+        {!loading && !error && (viewMode === "all" ? allSessions.length === 0 : filteredSessions.length === 0) && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             No sessions found
           </div>
         )}
-        {sessionTree.map((node) => (
+        {viewMode === "all"
+          ? workspaceGroups.map((group) => (
+            <WorkspaceGroupSection
+              key={group.root}
+              group={group}
+              isActive={group.root === selectedProject}
+              collapsed={collapsedWorkspaces.has(group.root)}
+              onToggleCollapse={() => toggleWorkspaceCollapsed(group.root)}
+              homeDir={homeDir}
+              selectedSessionId={selectedSessionId}
+              runningSessionIds={runningSessionIds}
+              unreadSessionIds={unreadSessionIds}
+              onSelectSession={handleSelectSessionFromList}
+              onRenamed={loadSessions}
+              onSessionDeleted={(id) => {
+                onSessionDeleted?.(id);
+                loadSessions();
+              }}
+            />
+          ))
+          : sessionTree.map((node) => (
           <SessionTreeItem
             key={node.session.id}
             node={node}
@@ -1400,7 +1538,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             }}
             depth={0}
           />
-        ))}
+          ))}
       </div>
 
       {/* File Explorer section */}
@@ -1520,6 +1658,104 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               />
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkspaceGroupSection({
+  group,
+  isActive,
+  collapsed,
+  onToggleCollapse,
+  homeDir,
+  selectedSessionId,
+  runningSessionIds,
+  unreadSessionIds,
+  onSelectSession,
+  onRenamed,
+  onSessionDeleted,
+}: {
+  group: WorkspaceGroup;
+  isActive: boolean;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  homeDir: string;
+  selectedSessionId: string | null;
+  runningSessionIds: Set<string>;
+  unreadSessionIds: Set<string>;
+  onSelectSession: (s: SessionInfo) => void;
+  onRenamed?: () => void;
+  onSessionDeleted?: (id: string) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div style={{ marginTop: 2 }}>
+      <div
+        onClick={onToggleCollapse}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        title={displayCwd(group.root, homeDir)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          height: 30,
+          margin: "0 6px",
+          padding: "0 8px",
+          borderRadius: 7,
+          cursor: "pointer",
+          background: hovered ? "var(--bg-hover)" : "transparent",
+          transition: "background 0.1s",
+          userSelect: "none",
+        }}
+      >
+        <svg
+          width="9" height="9" viewBox="0 0 10 10" fill="none"
+          stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", flexShrink: 0 }}
+        >
+          <polyline points="3 2 7 5 3 8" />
+        </svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={isActive ? "var(--accent)" : "var(--text-dim)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+        </svg>
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: 12,
+            fontWeight: 600,
+            color: isActive ? "var(--accent)" : "var(--text)",
+            letterSpacing: "-0.005em",
+          }}
+        >
+          {workspaceName(group.root)}
+        </span>
+        <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
+          {formatRelativeTime(group.latest)}
+        </span>
+      </div>
+      {!collapsed && (
+        <div style={{ marginBottom: 4 }}>
+          {group.tree.map((node) => (
+            <SessionTreeItem
+              key={node.session.id}
+              node={node}
+              selectedSessionId={selectedSessionId}
+              runningSessionIds={runningSessionIds}
+              unreadSessionIds={unreadSessionIds}
+              onSelectSession={onSelectSession}
+              onRenamed={onRenamed}
+              onSessionDeleted={onSessionDeleted}
+              depth={0}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -1751,16 +1987,18 @@ function SessionItem({
         height: ITEM_HEIGHT,
         display: "flex",
         alignItems: "center",
-        paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
+        margin: "2px 6px",
+        borderRadius: 9,
+        paddingLeft: depth > 0 ? depth * 12 + 10 : 10,
         paddingRight: 8,
         cursor: confirmDelete || renaming ? "default" : "pointer",
         background: confirmDelete
           ? "rgba(239,68,68,0.06)"
           : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
-        borderLeft: confirmDelete
-          ? "2px solid #ef4444"
-          : isSelected ? "2px solid var(--accent)" : "2px solid transparent",
-        transition: "background 0.1s",
+        boxShadow: confirmDelete
+          ? "inset 2px 0 0 #ef4444"
+          : isSelected ? "inset 2px 0 0 var(--accent)" : "none",
+        transition: "background 0.1s, box-shadow 0.1s",
         opacity: deleting ? 0.5 : 1,
         gap: 6,
         overflow: "hidden",

@@ -61,14 +61,20 @@ type ExtensionBindingOptions = {
 
 const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
+// 0.84.x Theme constructor needs fallback values for the optional tokens it derives.
+const PLAIN_FG_COLORS = {
+  thinkingMax: "",
+  searchMatchText: "",
+} as ConstructorParameters<typeof Theme>[0];
+const PLAIN_BG_COLORS = {
+  selectedBg: "",
+  searchMatchBg: "",
+} as ConstructorParameters<typeof Theme>[1];
+
 // Extensions require a complete Theme, while the web UI applies its own styling.
 class PlainTextTheme extends Theme {
   constructor() {
-    super(
-      { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
-      {} as ConstructorParameters<typeof Theme>[1],
-      "truecolor",
-    );
+    super(PLAIN_FG_COLORS, PLAIN_BG_COLORS, "truecolor", { name: "plain" });
   }
 
   override fg(...[, text]: Parameters<Theme["fg"]>): string { return text; }
@@ -89,16 +95,17 @@ class PlainTextTheme extends Theme {
 const PLAIN_TEXT_THEME = new PlainTextTheme();
 const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
 
-function withExtensionTools(session: AgentSessionLike, toolNames: string[]): string[] {
+function withExtensionTools(session: AgentSessionLike, toolNames: string[], exclude?: readonly string[]): string[] {
   if (toolNames.length === 0) return [];
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
+  const excluded = new Set(exclude ?? []);
   const extensionToolNames = session
     .getAllTools()
     .map((t) => t.name)
-    .filter((name) => !codingToolNames.has(name));
+    .filter((name) => !codingToolNames.has(name) && !excluded.has(name));
 
-  return [...new Set([...toolNames, ...extensionToolNames])];
+  return [...new Set([...toolNames, ...extensionToolNames])].filter((name) => !excluded.has(name));
 }
 
 // ============================================================================
@@ -541,8 +548,9 @@ export class AgentSessionWrapper {
 
       case "set_tools": {
         const toolNames = command.toolNames as string[];
+        const excludeTools = command.excludeTools as string[] | undefined;
         this.setForceEmptySystemPrompt(toolNames.length === 0);
-        this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+        this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames, excludeTools));
         this.applyForcedEmptySystemPrompt();
         return null;
       }
@@ -1035,12 +1043,15 @@ export function notifyRunningChange(): void {
  * Get or create an AgentSession for the given session.
  * For new sessions (sessionFile === ""), pi generates its own id.
  * Pass toolNames to pre-configure active tools (empty array = all tools disabled).
+ * Pass excludeTools to keep specific tools (e.g. extension tools like "subagent")
+ * out of the active set even though extension tools are auto-included.
  */
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
   cwd: string,
-  toolNames?: string[]
+  toolNames?: string[],
+  excludeTools?: string[]
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -1087,7 +1098,7 @@ export async function startRpcSession(
     // requested builtin coding tools PLUS all extension/package tools, so installed
     // extensions stay usable in Pi Web just like in the `pi` CLI.
     if (toolNames && toolNames.length > 0) {
-      inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
+      inner.setActiveToolsByName(withExtensionTools(inner, toolNames, excludeTools));
     }
 
     const wrapper = new AgentSessionWrapper(inner);

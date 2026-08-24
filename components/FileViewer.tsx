@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type UIEvent } from "react";
 import {
   Prism as SyntaxHighlighter,
   createElement as renderSyntaxNode,
@@ -74,6 +74,108 @@ const FILE_LINE_NUMBER_STYLE: CSSProperties = {
 type SourceCodeRendererProps = Parameters<NonNullable<SyntaxHighlighterProps["renderer"]>>[0] & {
   wrapLines: boolean;
 };
+
+/* Per-file scroll memory: switching file tabs restores the previous position. */
+const FILE_SCROLL_MEMORY_LIMIT = 200;
+const fileScrollMemory = new Map<string, { top: number; left: number }>();
+
+function rememberFileScrollPosition(filePath: string, top: number, left: number) {
+  if (fileScrollMemory.has(filePath)) fileScrollMemory.delete(filePath);
+  fileScrollMemory.set(filePath, { top, left });
+  if (fileScrollMemory.size > FILE_SCROLL_MEMORY_LIMIT) {
+    const oldestKey = fileScrollMemory.keys().next().value;
+    if (oldestKey !== undefined) fileScrollMemory.delete(oldestKey);
+  }
+}
+
+/* In-file search */
+const MAX_SEARCH_MATCHES = 1000;
+const SEARCH_MATCH_HIGHLIGHT_NAME = "file-search-match";
+const SEARCH_ACTIVE_HIGHLIGHT_NAME = "file-search-match-active";
+// Containers treated as search units: a query never matches across two units.
+const SEARCH_UNIT_SELECTOR = ".file-source-line-content, .file-diff-line-content, p, li, h1, h2, h3, h4, h5, h6, td, th, pre, blockquote";
+
+function collectSearchRanges(root: HTMLElement, query: string): { ranges: Range[]; capped: boolean } {
+  // Concatenate all rendered text nodes (skipping line numbers), inserting a
+  // virtual "\n" between search units so matches never span across lines/blocks.
+  const segments: Array<{ node: Text; start: number }> = [];
+  let fullText = "";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || !node.nodeValue) return NodeFilter.FILTER_REJECT;
+      if (parent.closest(".react-syntax-highlighter-line-number")) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  let previousUnit: Element | null = null;
+  let currentNode = walker.nextNode();
+  while (currentNode) {
+    const textNode = currentNode as Text;
+    const unit = textNode.parentElement?.closest(SEARCH_UNIT_SELECTOR) ?? null;
+    if (fullText.length > 0 && unit !== previousUnit) fullText += "\n";
+    segments.push({ node: textNode, start: fullText.length });
+    fullText += textNode.nodeValue as string;
+    previousUnit = unit;
+    currentNode = walker.nextNode();
+  }
+
+  // Binary search: last segment whose start <= offset.
+  const findSegment = (offset: number) => {
+    let low = 0;
+    let high = segments.length - 1;
+    let result: (typeof segments)[number] | null = null;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (segments[mid].start <= offset) {
+        result = segments[mid];
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return result;
+  };
+
+  const ranges: Range[] = [];
+  let capped = false;
+  const haystack = fullText.toLowerCase();
+  const needle = query.toLowerCase();
+  let fromIndex = 0;
+  for (;;) {
+    const matchIndex = haystack.indexOf(needle, fromIndex);
+    if (matchIndex === -1) break;
+    if (ranges.length >= MAX_SEARCH_MATCHES) {
+      capped = true;
+      break;
+    }
+    const matchEnd = matchIndex + needle.length;
+    const startSegment = findSegment(matchIndex);
+    const endSegment = findSegment(matchEnd - 1);
+    if (startSegment && endSegment) {
+      const range = document.createRange();
+      range.setStart(startSegment.node, matchIndex - startSegment.start);
+      range.setEnd(endSegment.node, matchEnd - endSegment.start);
+      ranges.push(range);
+    }
+    fromIndex = matchEnd;
+  }
+
+  return { ranges, capped };
+}
+
+type HighlightRegistryLike = { set(name: string, highlight: unknown): void; delete(name: string): void };
+
+function getSearchHighlightRegistry(): HighlightRegistryLike | null {
+  if (typeof CSS === "undefined" || !("highlights" in CSS)) return null;
+  return (CSS as unknown as { highlights: HighlightRegistryLike }).highlights;
+}
+
+function createSearchHighlight(ranges: Range[]): unknown | null {
+  const ctor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
+  return ctor ? new ctor(...ranges) : null;
+}
 
 interface SelectedLineRange {
   startLine: number;
@@ -802,6 +904,12 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [selectedLineRange, setSelectedLineRange] = useState<SelectedLineRange | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMatches, setSearchMatches] = useState<Range[]>([]);
+  const [searchCapped, setSearchCapped] = useState(false);
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const searchScrollPendingRef = useRef(false);
+  const lastSearchQueryRef = useRef("");
 
   const fetchContent = useCallback((filePath: string) => {
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId))
@@ -951,6 +1059,102 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [displayMode, mentionLineRange, onMentionLines]);
 
+  // Persist the scroll position per file so switching file tabs and coming
+  // back restores the previous reading position instead of jumping to line 1.
+  const handleContentScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    rememberFileScrollPosition(filePath, target.scrollTop, target.scrollLeft);
+  }, [filePath]);
+
+  useLayoutEffect(() => {
+    const element = contentRef.current;
+    if (!element || loading || !data) return;
+    const saved = fileScrollMemory.get(filePath);
+    element.scrollTop = saved?.top ?? 0;
+    element.scrollLeft = saved?.left ?? 0;
+  }, [filePath, loading, data]);
+
+  // Recompute search matches when the query or the rendered content changes.
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      const root = contentRef.current;
+      const queryChanged = lastSearchQueryRef.current !== searchQuery;
+      lastSearchQueryRef.current = searchQuery;
+      // Scroll to the first match only when the query changed; live content
+      // updates recompute matches silently without yanking the scroll position.
+      searchScrollPendingRef.current = queryChanged;
+      if (!root || searchQuery === "") {
+        setSearchMatches([]);
+        setSearchCapped(false);
+        setActiveMatchIndex(0);
+        return;
+      }
+      const { ranges, capped } = collectSearchRanges(root, searchQuery);
+      setSearchMatches(ranges);
+      setSearchCapped(capped);
+      setActiveMatchIndex(0);
+    }, 150);
+    return () => window.clearTimeout(handle);
+  }, [searchQuery, data?.content, displayMode, wrapLines, isDark]);
+
+  // Paint search highlights via the CSS Custom Highlight API when available.
+  useEffect(() => {
+    const registry = getSearchHighlightRegistry();
+    if (!registry) return;
+    const inactiveRanges = searchMatches.filter((_, index) => index !== activeMatchIndex);
+    const inactiveHighlight = inactiveRanges.length > 0 ? createSearchHighlight(inactiveRanges) : null;
+    if (inactiveHighlight) registry.set(SEARCH_MATCH_HIGHLIGHT_NAME, inactiveHighlight);
+    else registry.delete(SEARCH_MATCH_HIGHLIGHT_NAME);
+    const activeRange = searchMatches[activeMatchIndex];
+    const activeHighlight = activeRange ? createSearchHighlight([activeRange]) : null;
+    if (activeHighlight) registry.set(SEARCH_ACTIVE_HIGHLIGHT_NAME, activeHighlight);
+    else registry.delete(SEARCH_ACTIVE_HIGHLIGHT_NAME);
+    return () => {
+      registry.delete(SEARCH_MATCH_HIGHLIGHT_NAME);
+      registry.delete(SEARCH_ACTIVE_HIGHLIGHT_NAME);
+    };
+  }, [searchMatches, activeMatchIndex]);
+
+  // Mark the active match's line and scroll it into view when needed.
+  useEffect(() => {
+    const root = contentRef.current;
+    root?.querySelector(".file-search-active-line")?.classList.remove("file-search-active-line");
+    const range = searchMatches[activeMatchIndex];
+    if (!range) {
+      searchScrollPendingRef.current = false;
+      return;
+    }
+    const startNode = range.startContainer;
+    const startElement = startNode.nodeType === Node.ELEMENT_NODE
+      ? startNode as Element
+      : startNode.parentElement;
+    const lineElement = startElement?.closest(".file-source-line, .file-diff-line") ?? null;
+    lineElement?.classList.add("file-search-active-line");
+    if (searchScrollPendingRef.current) {
+      searchScrollPendingRef.current = false;
+      (lineElement ?? startElement)?.scrollIntoView({ block: "center", inline: "nearest" });
+    }
+  }, [activeMatchIndex, searchMatches]);
+
+  const navigateSearch = useCallback((direction: 1 | -1) => {
+    if (searchMatches.length === 0) return;
+    searchScrollPendingRef.current = true;
+    setActiveMatchIndex((current) => (
+      (current + direction + searchMatches.length) % searchMatches.length
+    ));
+  }, [searchMatches.length]);
+
+  const handleSearchKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      navigateSearch(event.shiftKey ? -1 : 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      if (searchQuery !== "") setSearchQuery("");
+      else event.currentTarget.blur();
+    }
+  }, [navigateSearch, searchQuery]);
+
   if (loading) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>
@@ -980,6 +1184,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     ...(hasGitDiff ? ["diff" as const] : []),
   ];
   const metadata = `${data.language} · ${lines.length} lines · ${formatSize(data.size)}`;
+  const searchDisabled = isHtml && displayMode === "preview";
 
   return (
     <div className="file-viewer-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -1000,6 +1205,69 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
         <span className="file-viewer-path" style={{ fontFamily: "var(--font-mono)" }} title={filePath}>
           {getRelativeFilePath(filePath, cwd)}
         </span>
+
+        <div className="file-viewer-search" role="search">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search in file"
+            aria-label="Search in file"
+            spellCheck={false}
+            disabled={searchDisabled}
+            title={searchDisabled ? "Search is not available in HTML preview" : "Search in file (Enter: next, Shift+Enter: previous)"}
+          />
+          {searchQuery !== "" && !searchDisabled && (
+            <>
+              <span className="file-viewer-search-count" aria-live="polite">
+                {searchMatches.length === 0
+                  ? "No results"
+                  : `${activeMatchIndex + 1}/${searchMatches.length}${searchCapped ? "+" : ""}`}
+              </span>
+              <button
+                type="button"
+                onClick={() => navigateSearch(-1)}
+                disabled={searchMatches.length === 0}
+                title="Previous match (Shift+Enter)"
+                aria-label="Previous match"
+                className="file-viewer-search-button"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="18 15 12 9 6 15" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => navigateSearch(1)}
+                disabled={searchMatches.length === 0}
+                title="Next match (Enter)"
+                aria-label="Next match"
+                className="file-viewer-search-button"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                title="Clear search (Esc)"
+                aria-label="Clear search"
+                className="file-viewer-search-button"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </>
+          )}
+        </div>
 
         <span className="file-viewer-meta" title={metadata}>{metadata}</span>
         <span
@@ -1079,7 +1347,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       </div>
 
       {/* Content area */}
-      <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
+      <div ref={contentRef} className="file-viewer-content" onScroll={handleContentScroll} style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
         {displayMode === "diff" && hasGitDiff ? (
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && displayMode === "preview" ? (

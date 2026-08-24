@@ -348,6 +348,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
+  // Parent-child (subagent) mode: when enabled, the main agent can delegate
+  // tasks to subagents running cheaper models. childModel is persisted
+  // server-side (subagent.config.json) and applies to every delegation.
+  const [subagentInstalled, setSubagentInstalled] = useState(false);
+  const [subagentEnabled, setSubagentEnabledState] = useState(false);
+  const subagentEnabledRef = useRef(false);
+  // Exec group (scout/worker) follows defaultModel; judge group (planner/reviewer)
+  // follows agentModels overrides.
+  const [childModel, setChildModel] = useState<SelectedModel | null>(null);
+  const [judgeModel, setJudgeModel] = useState<SelectedModel | null>(null);
+  const setSubagentEnabled = useCallback((enabled: boolean) => {
+    setSubagentEnabledState(enabled);
+    subagentEnabledRef.current = enabled;
+  }, []);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
@@ -431,6 +445,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
+
+  // Per-model token/cost breakdown: parent models from assistant message usage,
+  // subagent child models from subagent tool-result details (child processes run
+  // --no-session, so their usage only exists inside the tool result details).
+  const modelBreakdown = useMemo(() => {
+    const parents = new Map<string, { model: string; turns: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }>();
+    const children = new Map<string, { model: string; calls: number; turns: number; tokens: number; cost: number }>();
+    for (const msg of messages) {
+      if (msg.role === "assistant") {
+        const am = msg as import("@/lib/types").AssistantMessage;
+        const u = am.usage;
+        if (!am.model || !u) continue;
+        const e = parents.get(am.model) ?? { model: am.model, turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+        e.turns += 1;
+        e.input += u.input ?? 0;
+        e.output += u.output ?? 0;
+        e.cacheRead += u.cacheRead ?? 0;
+        e.cacheWrite += u.cacheWrite ?? 0;
+        e.cost += u.cost?.total ?? 0;
+        parents.set(am.model, e);
+      } else if (msg.role === "toolResult" && (msg as import("@/lib/types").ToolResultMessage).toolName === "subagent") {
+        const details = (msg as import("@/lib/types").ToolResultMessage).details as {
+          results?: Array<{ model?: string; usage?: { turns?: number; input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } }>;
+        } | undefined;
+        if (!Array.isArray(details?.results)) continue;
+        for (const r of details.results) {
+          if (!r?.model) continue;
+          const e = children.get(r.model) ?? { model: r.model, calls: 0, turns: 0, tokens: 0, cost: 0 };
+          e.calls += 1;
+          e.turns += r.usage?.turns ?? 0;
+          e.tokens += (r.usage?.input ?? 0) + (r.usage?.output ?? 0) + (r.usage?.cacheRead ?? 0) + (r.usage?.cacheWrite ?? 0);
+          e.cost += r.usage?.cost ?? 0;
+          children.set(r.model, e);
+        }
+      }
+    }
+    return { parents: [...parents.values()], children: [...children.values()] };
+  }, [messages]);
+
+  const sessionStatsWithBreakdown = useMemo(() => {
+    if (!sessionStats) return null;
+    return { ...sessionStats, modelBreakdown };
+  }, [sessionStats, modelBreakdown]);
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     let messagesLoaded = false;
@@ -555,6 +612,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           toolNames,
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+          ...(subagentEnabled ? {} : { excludeTools: ["subagent"] }),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -570,7 +628,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, subagentEnabled]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -1457,11 +1515,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "set_tools", toolNames });
+      await sendAgentCommand(sid, { type: "set_tools", toolNames, ...(subagentEnabledRef.current ? {} : { excludeTools: ["subagent"] }) });
     } catch (e) {
       console.error("Failed to set tools:", e);
     }
   }, [setToolPresetState]);
+
+  const handleSubagentToggle = useCallback(async (enabled: boolean) => {
+    setSubagentEnabled(enabled);
+    try { window.localStorage.setItem("pi-web:subagent-enabled", enabled ? "1" : "0"); } catch { /* ignore */ }
+    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+    if (!sid) return;
+    try {
+      const toolNames = getToolNamesForPreset(toolPreset);
+      await sendAgentCommand(sid, { type: "set_tools", toolNames, ...(enabled ? {} : { excludeTools: ["subagent"] }) });
+    } catch (e) {
+      console.error("Failed to toggle subagent mode:", e);
+    }
+  }, [setSubagentEnabled, toolPreset]);
+
+  const handleChildModelChange = useCallback(async (sel: SelectedModel) => {
+    setChildModel(sel);
+    try {
+      await fetch("/api/subagent-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: `${sel.provider}/${sel.modelId}` }),
+      });
+    } catch (e) {
+      console.error("Failed to save subagent child model:", e);
+    }
+  }, []);
+
+  const handleJudgeModelChange = useCallback(async (sel: SelectedModel) => {
+    setJudgeModel(sel);
+    try {
+      await fetch("/api/subagent-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentModels: { planner: `${sel.provider}/${sel.modelId}`, reviewer: `${sel.provider}/${sel.modelId}` } }),
+      });
+    } catch (e) {
+      console.error("Failed to save subagent judge model:", e);
+    }
+  }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
@@ -1623,12 +1720,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
+  // Load subagent (parent-child mode) availability + persisted preferences.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/subagent-config");
+        if (res.ok) {
+          const d = (await res.json()) as { installed?: boolean; defaultModel?: string | null; agentModels?: Record<string, string> };
+          if (cancelled) return;
+          setSubagentInstalled(Boolean(d.installed));
+          const parseRef = (ref: string): SelectedModel | null => {
+            const slash = ref.indexOf("/");
+            return slash > 0 ? { provider: ref.slice(0, slash), modelId: ref.slice(slash + 1) } : null;
+          };
+          if (d.defaultModel) {
+            const sel = parseRef(d.defaultModel);
+            if (sel) setChildModel(sel);
+          }
+          const judgeRef = d.agentModels?.planner ?? d.agentModels?.reviewer;
+          if (judgeRef) {
+            const sel = parseRef(judgeRef);
+            if (sel) setJudgeModel(sel);
+          }
+        }
+      } catch { /* optional feature */ }
+      try {
+        if (window.localStorage.getItem("pi-web:subagent-enabled") === "1") setSubagentEnabled(true);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [setSubagentEnabled]);
+
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    retryInfo, contextUsage, systemPrompt, forkingEntryId, subagentInstalled, subagentEnabled, childModel, judgeModel,
+    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats: sessionStatsWithBreakdown,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
@@ -1642,7 +1771,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, handleSubagentToggle, handleChildModelChange, handleJudgeModelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions
