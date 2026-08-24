@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -406,9 +406,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
-  const [viewMode, setViewMode] = useState<SidebarViewMode>(() => loadViewMode());
+  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
+  const [viewMode, setViewMode] = useState<SidebarViewMode>("project");
+
+  // Load persisted UI state after hydration to avoid server/client mismatch.
+  useEffect(() => {
+    setUnreadSessionIds(loadUnreadSessionIds());
+    setViewMode(loadViewMode());
+  }, []);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
+  const [closedWorkspaces, setClosedWorkspaces] = useState<Set<string>>(() => new Set());
+  const workspaceCollapsedInitializedRef = useRef(false);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Once the SSE stream has delivered a frame it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
@@ -475,6 +483,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const next = new Set(prev);
       if (next.has(root)) next.delete(root);
       else next.add(root);
+      return next;
+    });
+  }, []);
+
+  const handleCloseWorkspace = useCallback((root: string) => {
+    setClosedWorkspaces((prev) => {
+      const next = new Set(prev);
+      next.add(root);
       return next;
     });
   }, []);
@@ -785,6 +801,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(tempId, selectedCwd);
   }, [selectedCwd, onNewSession]);
 
+  const handleNewSessionInWorkspace = useCallback((cwd: string) => {
+    const tempId = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    onNewSession?.(tempId, cwd);
+  }, [onNewSession]);
+
   const recentProjects = getRecentProjects(allSessions);
   const showProjectFilter = recentProjects.length > 8;
   const visibleProjects = projectFilter.trim()
@@ -828,7 +851,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Build parent-child tree within the filtered set
   const sessionTree = buildSessionTree(filteredSessions);
   // All-workspaces view: every project, grouped and ordered by recent activity
-  const workspaceGroups = viewMode === "all" ? groupSessionsByWorkspace(allSessions) : [];
+  const workspaceGroups = useMemo(() => viewMode === "all" ? groupSessionsByWorkspace(allSessions) : [], [viewMode, allSessions]);
+
+  // Workspaces are collapsed by default so the sidebar stays compact; once the
+  // user expands/collapses a workspace we no longer force the default.
+  useEffect(() => {
+    if (workspaceCollapsedInitializedRef.current) return;
+    if (workspaceGroups.length === 0) return;
+    workspaceCollapsedInitializedRef.current = true;
+    setCollapsedWorkspaces(new Set(workspaceGroups.map((g) => g.root)));
+  }, [workspaceGroups]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -1504,7 +1536,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
         )}
         {viewMode === "all"
-          ? workspaceGroups.map((group) => (
+          ? workspaceGroups.filter((g) => !closedWorkspaces.has(g.root)).map((group) => (
             <WorkspaceGroupSection
               key={group.root}
               group={group}
@@ -1521,6 +1553,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onSessionDeleted?.(id);
                 loadSessions();
               }}
+              onNewSession={handleNewSessionInWorkspace}
+              onCloseWorkspace={handleCloseWorkspace}
             />
           ))
           : sessionTree.map((node) => (
@@ -1676,6 +1710,8 @@ function WorkspaceGroupSection({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  onNewSession,
+  onCloseWorkspace,
 }: {
   group: WorkspaceGroup;
   isActive: boolean;
@@ -1688,6 +1724,8 @@ function WorkspaceGroupSection({
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  onNewSession?: (cwd: string) => void;
+  onCloseWorkspace?: (root: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -1737,12 +1775,73 @@ function WorkspaceGroupSection({
         >
           {workspaceName(group.root)}
         </span>
-        <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
-          {formatRelativeTime(group.latest)}
-        </span>
+        {hovered && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onNewSession?.(group.root);
+              }}
+              title={`New session in ${workspaceName(group.root)}`}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 18, height: 18, padding: 0,
+                background: "var(--bg-hover)", border: "1px solid var(--border)",
+                borderRadius: 5, color: "var(--text-muted)",
+                cursor: "pointer", flexShrink: 0,
+                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--bg-selected)";
+                e.currentTarget.style.color = "var(--accent)";
+                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text-muted)";
+                e.currentTarget.style.borderColor = "var(--border)";
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="5" y1="1" x2="5" y2="9" />
+                <line x1="1" y1="5" x2="9" y2="5" />
+              </svg>
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseWorkspace?.(group.root);
+              }}
+              title={`Close ${workspaceName(group.root)}`}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 18, height: 18, padding: 0,
+                background: "var(--bg-hover)", border: "1px solid var(--border)",
+                borderRadius: 5, color: "var(--text-muted)",
+                cursor: "pointer", flexShrink: 0,
+                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "rgba(239,68,68,0.08)";
+                e.currentTarget.style.color = "#ef4444";
+                e.currentTarget.style.borderColor = "rgba(239,68,68,0.35)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text-muted)";
+                e.currentTarget.style.borderColor = "var(--border)";
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="2" y1="2" x2="8" y2="8" />
+                <line x1="8" y1="2" x2="2" y2="8" />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
       {!collapsed && (
-        <div style={{ marginBottom: 4 }}>
+        <div style={{ marginBottom: 4, paddingLeft: 14 }}>
           {group.tree.map((node) => (
             <SessionTreeItem
               key={node.session.id}
@@ -1791,7 +1890,7 @@ function SessionTreeItem({
         {depth > 0 && (
           <div style={{
             position: "absolute",
-            left: depth * 12 + 6,
+            left: depth * 14 + 6,
             top: 0, bottom: 0,
             width: 1,
             background: "var(--border)",
@@ -1833,14 +1932,14 @@ function SessionTreeItem({
   );
 }
 
-function RunningSessionIndicator() {
+function CompactRunningIndicator() {
   return (
     <span
       title="Agent running…"
       aria-label="Agent running"
       style={{
-        width: 14,
-        height: 14,
+        width: 10,
+        height: 10,
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
@@ -1848,7 +1947,7 @@ function RunningSessionIndicator() {
         color: "var(--accent)",
       }}
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
         <g>
           <path
             d="M21 12a9 9 0 1 1-3.8-7.4"
@@ -1870,29 +1969,20 @@ function RunningSessionIndicator() {
   );
 }
 
-function UnreadSessionIndicator() {
+function CompactUnreadIndicator() {
   return (
     <span
       title="New activity"
       aria-label="New session activity"
       style={{
-        width: 14,
-        height: 14,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
+        width: 7,
+        height: 7,
+        borderRadius: "50%",
+        background: "#0891b2",
         flexShrink: 0,
-        color: "#0891b2",
+        display: "inline-block",
       }}
-    >
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <circle cx="7" cy="7" r="2.5" fill="currentColor" />
-        <circle cx="7" cy="7" r="3" stroke="currentColor" strokeWidth="1.4" opacity="0.32">
-          <animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.32;0;0.32" dur="1.6s" repeatCount="indefinite" />
-        </circle>
-      </svg>
-    </span>
+    />
   );
 }
 
@@ -1928,7 +2018,8 @@ function SessionItem({
   const [deleting, setDeleting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const title = session.name || session.firstMessage.slice(0, 60) || session.id.slice(0, 12);
+  const tooltip = `${title} · ${session.messageCount} msgs`;
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1975,22 +2066,23 @@ function SessionItem({
     setConfirmDelete(false);
   }, []);
 
-  // Fixed-height outer wrapper — content swaps in place so the list never reflows
-  const ITEM_HEIGHT = 54;
+  // Compact single-line session row — keeps the list dense while still showing
+  // status, title, relative time and hover actions.
+  const ITEM_HEIGHT = 30;
 
   return (
     <div
       onClick={confirmDelete || renaming ? undefined : onClick}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); }}
+      onMouseLeave={() => setHovered(false)}
       style={{
         height: ITEM_HEIGHT,
         display: "flex",
         alignItems: "center",
-        margin: "2px 6px",
-        borderRadius: 9,
-        paddingLeft: depth > 0 ? depth * 12 + 10 : 10,
-        paddingRight: 8,
+        margin: "1px 6px",
+        borderRadius: 6,
+        paddingLeft: depth > 0 ? depth * 14 + 10 : 10,
+        paddingRight: 6,
         cursor: confirmDelete || renaming ? "default" : "pointer",
         background: confirmDelete
           ? "rgba(239,68,68,0.06)"
@@ -2000,29 +2092,28 @@ function SessionItem({
           : isSelected ? "inset 2px 0 0 var(--accent)" : "none",
         transition: "background 0.1s, box-shadow 0.1s",
         opacity: deleting ? 0.5 : 1,
-        gap: 6,
+        gap: 5,
         overflow: "hidden",
       }}
     >
       {confirmDelete ? (
-        /* ── Delete confirmation: same height, two flat buttons ── */
         <>
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            Delete <span style={{ fontWeight: 600 }}>&ldquo;{title.slice(0, 22)}{title.length > 22 ? "…" : ""}&rdquo;</span>?
+          <div style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Delete <span style={{ fontWeight: 600 }}>&ldquo;{title.slice(0, 24)}{title.length > 24 ? "…" : ""}&rdquo;</span>?
           </div>
-          <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
             <button
               onClick={handleDeleteConfirm}
               style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                height: 30, padding: "0 11px",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 3,
+                height: 22, padding: "0 9px",
                 background: "#ef4444", border: "none",
-                borderRadius: 6, color: "#fff",
-                cursor: "pointer", fontSize: 12, fontWeight: 600,
+                borderRadius: 5, color: "#fff",
+                cursor: "pointer", fontSize: 11, fontWeight: 600,
                 whiteSpace: "nowrap",
               }}
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="3 6 5 6 21 6" />
                 <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                 <path d="M10 11v6M14 11v6" />
@@ -2034,10 +2125,10 @@ function SessionItem({
               onClick={handleDeleteCancel}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
-                height: 30, padding: "0 11px",
+                height: 22, padding: "0 9px",
                 background: "var(--bg)", border: "1px solid var(--border)",
-                borderRadius: 6, color: "var(--text-muted)",
-                cursor: "pointer", fontSize: 12, fontWeight: 500,
+                borderRadius: 5, color: "var(--text-muted)",
+                cursor: "pointer", fontSize: 11, fontWeight: 500,
                 whiteSpace: "nowrap",
               }}
             >
@@ -2046,7 +2137,6 @@ function SessionItem({
           </div>
         </>
       ) : renaming ? (
-        /* ── Rename: input fills the same row ── */
         <input
           ref={inputRef}
           value={renameValue}
@@ -2059,20 +2149,18 @@ function SessionItem({
           autoFocus
           style={{
             flex: 1,
-            fontSize: 12,
-            padding: "5px 8px",
+            fontSize: 11,
+            padding: "3px 7px",
             border: "1px solid var(--accent)",
             borderRadius: 5,
             outline: "none",
             background: "var(--bg)",
             color: "var(--text)",
-            height: 30,
+            height: 22,
           }}
         />
       ) : (
-        /* ── Normal view ── */
         <>
-          {/* Fork indicator for child sessions */}
           {depth > 0 && (
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
               <line x1="6" y1="3" x2="6" y2="15" />
@@ -2081,81 +2169,70 @@ function SessionItem({
               <path d="M18 9a9 9 0 0 1-9 9" />
             </svg>
           )}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
+          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 5 }}>
+            {isRunning ? (
+              <CompactRunningIndicator />
+            ) : isUnread ? (
+              <CompactUnreadIndicator />
+            ) : null}
+            <span
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 5,
+                flex: 1,
                 minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
                 fontSize: 12,
                 fontWeight: isSelected ? 500 : 400,
-                lineHeight: 1.4,
                 color: "var(--text)",
               }}
-              title={title}
+              title={tooltip}
             >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                {title}
-              </span>
-            </div>
-            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              {isRunning ? (
-                <RunningSessionIndicator />
-              ) : isUnread ? (
-                <UnreadSessionIndicator />
-              ) : (
-                <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
-              )}
-              <span>{session.messageCount} msgs</span>
-              {session.worktreeBranch && (
-                <span
-                  title={`Worktree: ${session.cwd}`}
-                  style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <line x1="6" y1="3" x2="6" y2="15" />
-                    <circle cx="18" cy="6" r="3" />
-                    <circle cx="6" cy="18" r="3" />
-                    <path d="M18 9a9 9 0 0 1-9 9" />
-                  </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span>
-                </span>
-              )}
-            </div>
+              {title}
+            </span>
           </div>
 
-          {/* Collapse toggle — always visible when has children */}
+          <span
+            title={session.modified}
+            style={{
+              flexShrink: 0,
+              fontSize: 10,
+              color: "var(--text-dim)",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {formatRelativeTime(session.modified)}
+          </span>
+
           {hasChildren && (
             <button
               onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
               title={collapsed ? "Expand forks" : "Collapse forks"}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
-                width: 20, height: 20, padding: 0, flexShrink: 0,
+                width: 16, height: 16, padding: 0, flexShrink: 0,
                 background: "none", border: "none",
                 color: "var(--text-dim)", cursor: "pointer",
                 transform: collapsed ? "rotate(-90deg)" : "none",
                 transition: "transform 0.15s",
               }}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="2 3.5 5 6.5 8 3.5" />
               </svg>
             </button>
           )}
 
-          {/* Action buttons — shown on hover */}
           {hovered && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
               <button
                 onClick={startRename}
                 title="Rename"
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
+                  width: 22, height: 22, padding: 0,
                   background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
+                  borderRadius: 5, color: "var(--text-muted)",
                   cursor: "pointer", flexShrink: 0,
                   transition: "background 0.12s, color 0.12s, border-color 0.12s",
                 }}
@@ -2170,7 +2247,7 @@ function SessionItem({
                   e.currentTarget.style.borderColor = "var(--border)";
                 }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
                 </svg>
               </button>
@@ -2179,9 +2256,9 @@ function SessionItem({
                 title="Delete"
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
+                  width: 22, height: 22, padding: 0,
                   background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
+                  borderRadius: 5, color: "var(--text-muted)",
                   cursor: "pointer", flexShrink: 0,
                   transition: "background 0.12s, color 0.12s, border-color 0.12s",
                 }}
@@ -2196,7 +2273,7 @@ function SessionItem({
                   e.currentTarget.style.borderColor = "var(--border)";
                 }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="3 6 5 6 21 6" />
                   <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                   <path d="M10 11v6M14 11v6" />
