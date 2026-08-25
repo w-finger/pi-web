@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent, useLayoutEffect } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import {
@@ -72,6 +72,8 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** Whether the input is rendered on the empty / new-session landing page */
+  isNewPage?: boolean;
 }
 
 export interface ChatInputHandle {
@@ -253,23 +255,17 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
   );
 }
 
-/** Compact model picker for subagent role groups (exec: scout/worker, judge: planner/reviewer). */
-function ChildModelDropdown({
-  groupLabel,
-  title,
+/** Model selector row used inside the 母子 agent popover. */
+function PopoverModelRow({
+  label,
   value,
   modelList,
   onChange,
-  isMobile,
-  controlsMenuOpen,
 }: {
-  groupLabel: string;
-  title: string;
+  label: string;
   value: { provider: string; modelId: string } | null | undefined;
   modelList?: { id: string; name: string; provider: string }[];
   onChange: (sel: { provider: string; modelId: string }) => void;
-  isMobile: boolean;
-  controlsMenuOpen: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -292,50 +288,30 @@ function ChildModelDropdown({
     <div ref={ref} style={{ position: "relative" }}>
       <button
         onClick={() => setOpen((v) => !v)}
-        title={`${title}: ${displayLabel}`}
-        aria-label={title}
         style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-          padding: isMobile ? "0 6px" : "8px 12px",
-          width: isMobile ? "auto" : undefined,
-          height: 32,
-          background: open ? "var(--bg-hover)" : "none",
-          border: "none",
-          borderRadius: 9,
-          color: "var(--text-muted)",
+          display: "flex", alignItems: "center", gap: 8,
+          width: "100%", padding: "8px 10px",
+          background: "var(--bg-panel)",
+          border: "1px solid var(--border)",
+          borderRadius: 7,
+          color: "var(--text)",
           cursor: "pointer",
-          fontSize: 12,
-          transition: "background 0.12s, color 0.12s",
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.background = "var(--bg-hover)";
-          e.currentTarget.style.color = "var(--text)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.background = open ? "var(--bg-hover)" : "none";
-          e.currentTarget.style.color = "var(--text-muted)";
+          fontSize: 13, textAlign: "left",
         }}
       >
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="6" y="6" width="12" height="12" rx="2" />
-          <rect x="10" y="10" width="4" height="4" />
-          <line x1="9" y1="2" x2="9" y2="6" />
-          <line x1="15" y1="2" x2="15" y2="6" />
-          <line x1="9" y1="18" x2="9" y2="22" />
-          <line x1="15" y1="18" x2="15" y2="22" />
-          <line x1="2" y1="9" x2="6" y2="9" />
-          <line x1="2" y1="15" x2="6" y2="15" />
-          <line x1="18" y1="9" x2="22" y2="9" />
-          <line x1="18" y1="15" x2="22" y2="15" />
+        <span style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{label}</span>
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayLabel}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", opacity: 0.7 }}>
+          <polyline points="6 9 12 15 18 9" />
         </svg>
-        {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{groupLabel}·{displayLabel}</span>}
       </button>
       {open && (
         <div style={{
-          position: "absolute", bottom: "calc(100% + 6px)", right: 0,
-          zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
-          borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
-          overflowY: "auto", minWidth: 220, maxHeight: 320,
+          position: "relative",
+          marginTop: 4,
+          zIndex: 10,
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: 7, overflow: "hidden", maxHeight: 220, overflowY: "auto",
         }}>
           {(modelList ?? []).length === 0 && (
             <div style={{ padding: "7px 12px", fontSize: 12, color: "var(--text-dim)", whiteSpace: "nowrap" }}>无可用模型</div>
@@ -348,13 +324,11 @@ function ChildModelDropdown({
                 onClick={() => { setOpen(false); if (!isActive) onChange({ provider: m.provider, modelId: m.id }); }}
                 style={{
                   display: "flex", alignItems: "center", gap: 8,
-                  width: "100%", padding: "7px 12px",
+                  width: "100%", padding: "7px 10px",
                   background: isActive ? "var(--bg-selected)" : "none",
                   border: "none",
                   color: isActive ? "var(--text)" : "var(--text-muted)",
                   cursor: "pointer", fontSize: 12, textAlign: "left",
-                  fontWeight: isActive ? 600 : 400,
-                  whiteSpace: "nowrap",
                 }}
                 onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
@@ -362,8 +336,8 @@ function ChildModelDropdown({
                 {isActive
                   ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                   : <span style={{ width: 10, flexShrink: 0 }} />}
-                <span style={{ flex: 1 }}>{m.name || m.id}</span>
-                <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{m.provider}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name || m.id}</span>
+                <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>{m.provider}</span>
               </button>
             );
           })}
@@ -385,6 +359,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  isNewPage = false,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
@@ -393,6 +368,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const [subagentPopoverOpen, setSubagentPopoverOpen] = useState(false);
+  const [subagentPopoverPos, setSubagentPopoverPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
+  const subagentBtnRef = useRef<HTMLButtonElement>(null);
+  const subagentPopoverRef = useRef<HTMLDivElement>(null);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -1132,6 +1111,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (controlsMenuRef.current && !controlsMenuRef.current.contains(e.target as Node)) {
         setControlsMenuOpen(false);
       }
+      if (subagentPopoverRef.current && !subagentPopoverRef.current.contains(e.target as Node) && subagentBtnRef.current && !subagentBtnRef.current.contains(e.target as Node)) {
+        setSubagentPopoverOpen(false);
+      }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
       }
@@ -1144,6 +1126,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!isMobile) setControlsMenuOpen(false);
   }, [isMobile]);
 
+  useLayoutEffect(() => {
+    if (!subagentPopoverOpen) { setSubagentPopoverPos(null); return; }
+    const rect = subagentBtnRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const width = 280;
+    let left = rect.left + rect.width / 2 - width / 2;
+    const padding = 8;
+    left = Math.max(padding, Math.min(left, (window.innerWidth ?? 0) - width - padding));
+    setSubagentPopoverPos({ left, bottom: (window.innerHeight ?? 0) - rect.top + 8, width });
+  }, [subagentPopoverOpen]);
 
 
   return (
@@ -1152,7 +1144,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         flexShrink: 0,
         background: "transparent",
         padding: "0 16px 8px",
-        paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        paddingRight: isMobile || isNewPage ? 16 : 52, // desktop active chat: 16px base + 36px for ChatMinimap alignment
       }}
     >
       {/* Hidden file input */}
@@ -1621,8 +1613,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               border: `1px solid ${bashMode ? "var(--tool-bg)" : isStreaming && (onSteer || onFollowUp)
                 ? "rgba(234,179,8,0.4)"
                 : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: 14,
-              padding: "10px 10px 10px 14px",
+              borderRadius: isNewPage ? 18 : 14,
+              padding: isNewPage ? "14px 14px 14px 18px" : "10px 10px 10px 14px",
               boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
               transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
             } as React.CSSProperties}
@@ -1654,8 +1646,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             placeholder={
               isStreaming && (onSteer || onFollowUp)
                 ? "Steer now / queue follow-up..."
-                : isStreaming ? "Agent is running…"
-                : "Message… Type / for commands, @ for files"
+                : isStreaming ? "Agent is running..."
+                : ""
             }
             rows={1}
             style={{
@@ -2164,70 +2156,99 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
 
             {!isStreaming && subagentInstalled && onSubagentToggle && (
-              <button
-                onClick={() => onSubagentToggle(!subagentEnabled)}
-                title={subagentEnabled ? "母子 agent 模式：已开启（主 agent 可委派任务给子 agent，点击关闭）" : "母子 agent 模式：已关闭（点击开启）"}
-                aria-label="Toggle parent-child subagent mode"
-                aria-pressed={subagentEnabled}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                  padding: isMobile ? "0 6px" : "8px 12px",
-                  width: isMobile ? "auto" : undefined,
-                  height: 32,
-                  background: subagentEnabled ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderRadius: 9,
-                  color: subagentEnabled ? "var(--accent)" : "var(--text-muted)",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  transition: "background 0.12s, color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = subagentEnabled ? "var(--bg-selected)" : "none";
-                  e.currentTarget.style.color = subagentEnabled ? "var(--accent)" : "var(--text-muted)";
-                }}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="5.5" r="3" />
-                  <circle cx="5.5" cy="18" r="2.5" />
-                  <circle cx="18.5" cy="18" r="2.5" />
-                  <line x1="12" y1="8.5" x2="5.5" y2="15.5" />
-                  <line x1="12" y1="8.5" x2="18.5" y2="15.5" />
-                </svg>
-                {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>母子{subagentEnabled ? ":开" : ":关"}</span>}
-              </button>
-            )}
-            {!isStreaming && subagentInstalled && subagentEnabled && (onChildModelChange || onJudgeModelChange) && (
-              <>
-                {onJudgeModelChange && (
-                  <ChildModelDropdown
-                    groupLabel="判断"
-                    title="判断型子 agent 模型（planner / reviewer）"
-                    value={judgeModel}
-                    modelList={modelList}
-                    onChange={onJudgeModelChange}
-                    isMobile={isMobile}
-                    controlsMenuOpen={controlsMenuOpen}
-                  />
+              <div style={{ position: "relative" }}>
+                <button
+                  ref={subagentBtnRef}
+                  onClick={() => setSubagentPopoverOpen((v) => !v)}
+                  title={subagentEnabled ? "母子 agent 模式：已开启" : "母子 agent 模式：已关闭"}
+                  aria-label="Toggle parent-child subagent mode"
+                  aria-pressed={subagentEnabled}
+                  aria-expanded={subagentPopoverOpen}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                    padding: isMobile ? "0 6px" : "8px 12px",
+                    width: isMobile ? "auto" : undefined,
+                    height: 32,
+                    background: subagentEnabled ? "var(--bg-selected)" : "none",
+                    border: "none",
+                    borderRadius: 9,
+                    color: subagentEnabled ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    transition: "background 0.12s, color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--text)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = subagentEnabled ? "var(--bg-selected)" : "none";
+                    e.currentTarget.style.color = subagentEnabled ? "var(--accent)" : "var(--text-muted)";
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="5.5" r="3" />
+                    <circle cx="5.5" cy="18" r="2.5" />
+                    <circle cx="18.5" cy="18" r="2.5" />
+                    <line x1="12" y1="8.5" x2="5.5" y2="15.5" />
+                    <line x1="12" y1="8.5" x2="18.5" y2="15.5" />
+                  </svg>
+                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>母子</span>}
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: subagentPopoverOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", opacity: 0.75 }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {subagentPopoverOpen && subagentPopoverPos && (
+                  <div
+                    ref={subagentPopoverRef}
+                    style={{
+                      position: "fixed",
+                      left: subagentPopoverPos.left,
+                      bottom: subagentPopoverPos.bottom,
+                      width: subagentPopoverPos.width,
+                      zIndex: 100,
+                    }}
+                  >
+                    <div style={{
+                      background: "var(--bg)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 10,
+                      boxShadow: "0 -4px 20px rgba(0,0,0,0.12)",
+                      padding: "12px 14px",
+                      minWidth: 220,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
+                        <span style={{ fontSize: 14, fontWeight: 500, color: "var(--text)" }}>母子 agent 模式</span>
+                        <button
+                          onClick={() => onSubagentToggle(!subagentEnabled)}
+                          style={{
+                            width: 40, height: 22, borderRadius: 11, padding: 2,
+                            background: subagentEnabled ? "var(--accent)" : "var(--border)",
+                            border: "none", cursor: "pointer",
+                            transition: "background 0.15s",
+                            display: "flex", alignItems: "center", justifyContent: subagentEnabled ? "flex-end" : "flex-start",
+                          }}
+                          aria-pressed={subagentEnabled}
+                          title={subagentEnabled ? "关闭母子 agent 模式" : "开启母子 agent 模式"}
+                        >
+                          <span style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                        </button>
+                      </div>
+                      {subagentEnabled && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                          {onJudgeModelChange && (
+                            <PopoverModelRow label="判断" value={judgeModel} modelList={modelList} onChange={onJudgeModelChange} />
+                          )}
+                          {onChildModelChange && (
+                            <PopoverModelRow label="执行" value={childModel} modelList={modelList} onChange={onChildModelChange} />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
-                {onChildModelChange && (
-                  <ChildModelDropdown
-                    groupLabel="执行"
-                    title="执行型子 agent 模型（scout / worker）"
-                    value={childModel}
-                    modelList={modelList}
-                    onChange={onChildModelChange}
-                    isMobile={isMobile}
-                    controlsMenuOpen={controlsMenuOpen}
-                  />
-                )}
-              </>
+              </div>
             )}
-
             {!isStreaming && onCompact && (
               <div style={{ position: "relative" }}>
                 {compactError && (
